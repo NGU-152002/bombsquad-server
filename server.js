@@ -518,6 +518,17 @@ io.on('connection', (socket) => {
     });
 });
 
+// Health check endpoint for deployment platforms
+app.get('/health', (req, res) => {
+    res.status(200).json({ 
+        status: 'healthy', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        activeRooms: gameRooms.size,
+        activePlayers: playerSockets.size
+    });
+});
+
 // Serve the main game files
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'lobby.html'));
