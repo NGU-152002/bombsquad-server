@@ -126,6 +126,15 @@ class GameRoom {
         this.gameState = 'playing';
         this.gameStartTime = Date.now();
         this.roundTimer = 120;
+        
+        // Start periodic game state synchronization
+        this.syncInterval = setInterval(() => {
+            if (this.gameState === 'playing') {
+                this.broadcastToRoom('gameStateUpdate', this.getGameState());
+            } else {
+                clearInterval(this.syncInterval);
+            }
+        }, 5000); // Sync every 5 seconds
     }
     
     updatePlayer(playerId, updateData) {
@@ -427,8 +436,15 @@ io.on('connection', (socket) => {
                 setTimeout(() => {
                     if (room.canStartGame()) {
                         room.startGame();
-                        room.broadcastToRoom('gameStarted', room.getGameState());
-                        console.log(`Game started in room: ${data.roomId}`);
+                        const gameState = room.getGameState();
+                        
+                        // Broadcast game started event
+                        room.broadcastToRoom('gameStarted', gameState);
+                        
+                        // Also send game state update for synchronization
+                        room.broadcastToRoom('gameStateUpdate', gameState);
+                        
+                        console.log(`Game started in room: ${data.roomId}. Players: ${room.players.size}`);
                     }
                 }, 2000);
             }
