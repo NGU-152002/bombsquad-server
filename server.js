@@ -127,14 +127,14 @@ class GameRoom {
         this.gameStartTime = Date.now();
         this.roundTimer = 120;
         
-        // Start periodic game state synchronization
+        // Start periodic game state synchronization (reduced frequency to prevent noise)
         this.syncInterval = setInterval(() => {
             if (this.gameState === 'playing') {
                 this.broadcastToRoom('gameStateUpdate', this.getGameState());
             } else {
                 clearInterval(this.syncInterval);
             }
-        }, 5000); // Sync every 5 seconds
+        }, 10000); // Sync every 10 seconds (was 5 seconds)
     }
     
     updatePlayer(playerId, updateData) {
@@ -438,11 +438,13 @@ io.on('connection', (socket) => {
                         room.startGame();
                         const gameState = room.getGameState();
                         
-                        // Broadcast game started event
+                        // Send game started event first
                         room.broadcastToRoom('gameStarted', gameState);
                         
-                        // Also send game state update for synchronization
-                        room.broadcastToRoom('gameStateUpdate', gameState);
+                        // Send game state update after a short delay to prevent race condition
+                        setTimeout(() => {
+                            room.broadcastToRoom('gameStateUpdate', gameState);
+                        }, 500);
                         
                         console.log(`Game started in room: ${data.roomId}. Players: ${room.players.size}`);
                     }
