@@ -407,8 +407,18 @@ io.on('connection', (socket) => {
     });
     
     socket.on('joinRoom', (data) => {
+        console.log(`[DEBUG] joinRoom called for socket ${socket.id}, roomId: ${data.roomId}`);
+        
+        // Check if socket is already in a room to prevent duplicates
+        const existingPlayerInfo = playerSockets.get(socket.id);
+        if (existingPlayerInfo) {
+            console.log(`[DEBUG] Socket ${socket.id} already in room ${existingPlayerInfo.roomId}, ignoring duplicate joinRoom`);
+            return;
+        }
+        
         const room = gameRooms.get(data.roomId);
         if (!room) {
+            console.log(`[DEBUG] Room ${data.roomId} not found. Available rooms:`, Array.from(gameRooms.keys()));
             socket.emit('error', { message: 'Room not found' });
             return;
         }
@@ -446,7 +456,7 @@ io.on('connection', (socket) => {
                             room.broadcastToRoom('gameStateUpdate', gameState);
                         }, 500);
                         
-                        console.log(`Game started in room: ${data.roomId}. Players: ${room.players.size}`);
+                        console.log(`[DEBUG] Game started in room: ${data.roomId}. Players: ${room.players.size}`);
                     }
                 }, 2000);
             }
@@ -510,7 +520,7 @@ io.on('connection', (socket) => {
     });
     
     socket.on('disconnect', () => {
-        console.log(`Player disconnected: ${socket.id}`);
+        console.log(`[DEBUG] Player disconnected: ${socket.id}`);
         
         const playerInfo = playerSockets.get(socket.id);
         if (playerInfo) {
@@ -523,10 +533,12 @@ io.on('connection', (socket) => {
                         gameState: room.getGameState()
                     });
                     
-                    // Clean up empty rooms
-                    if (room.players.size === 0) {
+                    // Clean up empty rooms (but not if game is starting)
+                    if (room.players.size === 0 && room.gameState !== 'playing') {
                         gameRooms.delete(playerInfo.roomId);
-                        console.log(`Room deleted: ${playerInfo.roomId}`);
+                        console.log(`[DEBUG] Room deleted: ${playerInfo.roomId}`);
+                    } else if (room.players.size === 0) {
+                        console.log(`[DEBUG] Room ${playerInfo.roomId} empty but game is playing, keeping room`);
                     }
                 }
             }
