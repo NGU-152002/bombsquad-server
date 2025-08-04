@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -13,22 +14,11 @@ const io = socketIo(server, {
 });
 
 app.use(cors());
-app.use(express.json());
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        uptime: process.uptime(),
-        rooms: gameRooms.size,
-        players: playerSockets.size 
-    });
-});
+app.use(express.static(path.join(__dirname)));
 
 // Game state and room management
 const gameRooms = new Map();
 const playerSockets = new Map();
-const transitioningPlayers = new Map(); // Track players transitioning between pages
 
 class GameRoom {
     constructor(roomId, maxPlayers = 4) {
@@ -41,7 +31,6 @@ class GameRoom {
         this.powerUps = new Map();
         this.destructibleBlocks = [];
         this.roundTimer = 120;
-        this.lastUpdate = Date.now();
         
         // Initialize destructible blocks (same as client)
         this.initializeDestructibleBlocks();
@@ -111,9 +100,8 @@ class GameRoom {
             isAlive: true,
             bombCapacity: 1,
             bombCount: 0,
-            bombPower: 5,
-            powerUps: { speed: 1, bombs: 0, power: 0 },
-            lastUpdate: Date.now()
+            bombPower: 3,
+            powerUps: { speed: 1, bombs: 0, power: 0 }
         };
         
         this.players.set(playerId, player);
@@ -138,42 +126,14 @@ class GameRoom {
         this.gameState = 'playing';
         this.gameStartTime = Date.now();
         this.roundTimer = 120;
-        
-        // Mark all players as transitioning to prevent room deletion
-        for (let player of this.players.values()) {
-            transitioningPlayers.set(player.socket, {
-                roomId: this.roomId,
-                playerId: player.id,
-                playerName: player.name,
-                transitionStart: Date.now()
-            });
-        }
-        
-        console.log(`Game started in room ${this.roomId} with ${this.players.size} players`);
-    }
-    
-    // Try to rejoin a transitioning player
-    rejoinTransitioningPlayer(socket, oldPlayerData) {
-        // Find the original player slot
-        for (let [playerId, player] of this.players) {
-            if (player.name === oldPlayerData.playerName && playerId === oldPlayerData.playerId) {
-                // Update socket reference
-                player.socket = socket.id;
-                console.log(`Player ${player.name} successfully rejoined room ${this.roomId}`);
-                return player;
-            }
-        }
-        return null;
     }
     
     updatePlayer(playerId, updateData) {
         const player = this.players.get(playerId);
         if (player && player.isAlive) {
-            // Validate and update player position with bounds checking
-            const margin = 32;
-            player.x = Math.max(margin, Math.min(1024 - margin, updateData.x || player.x));
-            player.y = Math.max(margin, Math.min(768 - margin, updateData.y || player.y));
-            player.lastUpdate = Date.now();
+            // Validate and update player position
+            player.x = Math.max(32, Math.min(1024 - 32, updateData.x || player.x));
+            player.y = Math.max(32, Math.min(768 - 32, updateData.y || player.y));
             
             return true;
         }
@@ -217,7 +177,6 @@ class GameRoom {
             this.explodeBomb(bombId);
         }, 3000);
         
-        console.log(`Player ${playerId} placed bomb at (${bombX}, ${bombY})`);
         return bomb;
     }
     
@@ -225,14 +184,12 @@ class GameRoom {
         const bomb = this.bombs.get(bombId);
         if (!bomb) return;
         
-        console.log(`Exploding bomb ${bombId} at (${bomb.x}, ${bomb.y})`);
-        
         this.bombs.delete(bombId);
         
         // Decrease owner bomb count
         const owner = this.players.get(bomb.owner);
         if (owner) {
-            owner.bombCount = Math.max(0, owner.bombCount - 1);
+            owner.bombCount--;
         }
         
         // Calculate explosion areas
@@ -251,15 +208,13 @@ class GameRoom {
                     player.health -= 25;
                     if (player.health <= 0) {
                         player.isAlive = false;
-                        console.log(`Player ${player.id} eliminated`);
                     }
                     break;
                 }
             }
         }
         
-        // Chain reactions with delay to prevent infinite loops
-        const chainBombs = [];
+        // Chain reactions
         for (let otherBomb of this.bombs.values()) {
             if (otherBomb.id === bombId) continue;
             
@@ -269,18 +224,13 @@ class GameRoom {
                 );
                 
                 if (distance < 40) {
-                    chainBombs.push(otherBomb.id);
+                    setTimeout(() => {
+                        this.explodeBomb(otherBomb.id);
+                    }, 50);
                     break;
                 }
             }
         }
-        
-        // Trigger chain reactions with delay
-        chainBombs.forEach(chainBombId => {
-            setTimeout(() => {
-                this.explodeBomb(chainBombId);
-            }, 50);
-        });
         
         // Destroy blocks and create power-ups
         const destroyedBlocks = [];
@@ -384,7 +334,6 @@ class GameRoom {
         }
         
         this.powerUps.delete(powerUpId);
-        console.log(`Player ${playerId} collected ${powerUp.type} power-up`);
         return true;
     }
     
@@ -394,8 +343,6 @@ class GameRoom {
         if (alivePlayers.length <= 1) {
             this.gameState = 'finished';
             const winner = alivePlayers.length === 1 ? alivePlayers[0] : null;
-            
-            console.log(`Game finished in room ${this.roomId}. Winner: ${winner ? winner.name : 'Draw'}`);
             
             this.broadcastToRoom('gameOver', {
                 winner: winner ? winner.id : null,
@@ -424,16 +371,6 @@ class GameRoom {
             roundTimer: this.roundTimer
         };
     }
-    
-    // Cleanup old power-ups (15 seconds)
-    cleanupOldPowerUps() {
-        const now = Date.now();
-        for (let [id, powerUp] of this.powerUps) {
-            if (now - powerUp.spawnedAt > 15000) {
-                this.powerUps.delete(id);
-            }
-        }
-    }
 }
 
 // Socket.IO connection handling
@@ -441,175 +378,111 @@ io.on('connection', (socket) => {
     console.log(`Player connected: ${socket.id}`);
     
     socket.on('createRoom', (data) => {
-        try {
-            const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            const room = new GameRoom(roomId, data.maxPlayers || 4);
-            gameRooms.set(roomId, room);
+        const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const room = new GameRoom(roomId, data.maxPlayers || 4);
+        gameRooms.set(roomId, room);
+        
+        const player = room.addPlayer(socket, data);
+        if (player) {
+            socket.join(roomId);
+            playerSockets.set(socket.id, { roomId, playerId: player.id });
             
-            const player = room.addPlayer(socket, data);
-            if (player) {
-                socket.join(roomId);
-                playerSockets.set(socket.id, { roomId, playerId: player.id });
-                
-                socket.emit('roomCreated', {
-                    roomId: roomId,
-                    playerId: player.id,
-                    gameState: room.getGameState()
-                });
-                
-                console.log(`Room created: ${roomId} by ${player.name}`);
-            }
-        } catch (error) {
-            console.error('Error creating room:', error);
-            socket.emit('error', { message: 'Failed to create room' });
+            socket.emit('roomCreated', {
+                roomId: roomId,
+                playerId: player.id,
+                gameState: room.getGameState()
+            });
+            
+            console.log(`Room created: ${roomId} by ${player.name}`);
         }
     });
     
     socket.on('joinRoom', (data) => {
-        try {
-            const room = gameRooms.get(data.roomId);
-            if (!room) {
-                socket.emit('error', { message: 'Room not found' });
-                return;
-            }
+        const room = gameRooms.get(data.roomId);
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        const player = room.addPlayer(socket, data);
+        if (player) {
+            socket.join(data.roomId);
+            playerSockets.set(socket.id, { roomId: data.roomId, playerId: player.id });
             
-            // Check if this is a reconnecting player
-            let player = null;
-            let isReconnecting = false;
+            socket.emit('roomJoined', {
+                playerId: player.id,
+                gameState: room.getGameState()
+            });
             
-            // Look for transitioning player data (try name first, then player ID)
-            const transitioningPlayer = Array.from(transitioningPlayers.entries())
-                .find(([oldSocketId, transData]) => 
-                    transData.roomId === data.roomId && 
-                    (transData.playerName === data.name || transData.playerId === data.playerId)
-                );
+            // Notify other players
+            room.broadcastToRoom('playerJoined', {
+                player: player,
+                gameState: room.getGameState()
+            });
             
-            if (transitioningPlayer) {
-                // This is a reconnecting player
-                const [oldSocketId, transData] = transitioningPlayer;
-                player = room.rejoinTransitioningPlayer(socket, transData);
-                
-                if (player) {
-                    isReconnecting = true;
-                    transitioningPlayers.delete(oldSocketId);
-                    console.log(`Player ${data.name} successfully reconnected to room ${data.roomId}`);
-                }
-            }
+            console.log(`${player.name} joined room: ${data.roomId}`);
             
-            // If not reconnecting, try to add as new player
-            if (!player) {
-                player = room.addPlayer(socket, data);
-            }
-            
-            if (player) {
-                socket.join(data.roomId);
-                playerSockets.set(socket.id, { roomId: data.roomId, playerId: player.id });
-                
-                socket.emit('roomJoined', {
-                    playerId: player.id,
-                    gameState: room.getGameState(),
-                    isReconnecting: isReconnecting
-                });
-                
-                if (!isReconnecting) {
-                    // Notify other players only for new joins
-                    room.broadcastToRoom('playerJoined', {
-                        player: player,
-                        gameState: room.getGameState()
-                    });
-                    
-                    console.log(`${player.name} joined room: ${data.roomId}`);
-                    
-                    // Auto-start game if enough players
+            // Auto-start game if enough players
+            if (room.canStartGame()) {
+                setTimeout(() => {
                     if (room.canStartGame()) {
-                        setTimeout(() => {
-                            if (room.canStartGame()) {
-                                room.startGame();
-                                room.broadcastToRoom('gameStarted', room.getGameState());
-                            }
-                        }, 2000);
+                        room.startGame();
+                        room.broadcastToRoom('gameStarted', room.getGameState());
+                        console.log(`Game started in room: ${data.roomId}`);
                     }
-                } else {
-                    // For reconnections, immediately send game started if game is already playing
-                    if (room.gameState === 'playing') {
-                        socket.emit('gameStarted', room.getGameState());
-                    }
-                }
-                
-                // Always ensure player is in the socket room
-                socket.join(data.roomId);
-                
-                // If game is already playing, notify all players about current state
-                if (room.gameState === 'playing') {
-                    room.broadcastToRoom('gameStateUpdate', room.getGameState());
-                }
-            } else {
-                socket.emit('error', { message: 'Room is full' });
+                }, 2000);
             }
-        } catch (error) {
-            console.error('Error joining room:', error);
-            socket.emit('error', { message: 'Failed to join room' });
+        } else {
+            socket.emit('error', { message: 'Room is full' });
         }
     });
     
     socket.on('playerMove', (data) => {
-        try {
-            const playerInfo = playerSockets.get(socket.id);
-            if (!playerInfo) return;
-            
-            const room = gameRooms.get(playerInfo.roomId);
-            if (!room || room.gameState !== 'playing') return;
-            
-            if (room.updatePlayer(playerInfo.playerId, data)) {
-                // Broadcast to other players (excluding sender)
-                socket.to(playerInfo.roomId).emit('playerMoved', {
-                    playerId: playerInfo.playerId,
-                    x: data.x,
-                    y: data.y
-                });
-            }
-        } catch (error) {
-            console.error('Error handling player move:', error);
+        const playerInfo = playerSockets.get(socket.id);
+        if (!playerInfo) return;
+        
+        const room = gameRooms.get(playerInfo.roomId);
+        if (!room || room.gameState !== 'playing') return;
+        
+        if (room.updatePlayer(playerInfo.playerId, data)) {
+            // Broadcast to other players
+            socket.to(playerInfo.roomId).emit('playerMoved', {
+                playerId: playerInfo.playerId,
+                x: data.x,
+                y: data.y
+            });
         }
     });
     
     socket.on('placeBomb', (data) => {
-        try {
-            const playerInfo = playerSockets.get(socket.id);
-            if (!playerInfo) return;
-            
-            const room = gameRooms.get(playerInfo.roomId);
-            if (!room || room.gameState !== 'playing') return;
-            
-            const bomb = room.placeBomb(playerInfo.playerId, data.x, data.y);
-            if (bomb) {
-                room.broadcastToRoom('bombPlaced', {
-                    bomb: bomb,
-                    playerId: playerInfo.playerId
-                });
-            }
-        } catch (error) {
-            console.error('Error placing bomb:', error);
+        const playerInfo = playerSockets.get(socket.id);
+        if (!playerInfo) return;
+        
+        const room = gameRooms.get(playerInfo.roomId);
+        if (!room || room.gameState !== 'playing') return;
+        
+        const bomb = room.placeBomb(playerInfo.playerId, data.x, data.y);
+        if (bomb) {
+            room.broadcastToRoom('bombPlaced', {
+                bomb: bomb,
+                playerId: playerInfo.playerId
+            });
         }
     });
     
     socket.on('collectPowerUp', (data) => {
-        try {
-            const playerInfo = playerSockets.get(socket.id);
-            if (!playerInfo) return;
-            
-            const room = gameRooms.get(playerInfo.roomId);
-            if (!room || room.gameState !== 'playing') return;
-            
-            if (room.collectPowerUp(playerInfo.playerId, data.powerUpId)) {
-                room.broadcastToRoom('powerUpCollected', {
-                    powerUpId: data.powerUpId,
-                    playerId: playerInfo.playerId,
-                    players: Array.from(room.players.values())
-                });
-            }
-        } catch (error) {
-            console.error('Error collecting power-up:', error);
+        const playerInfo = playerSockets.get(socket.id);
+        if (!playerInfo) return;
+        
+        const room = gameRooms.get(playerInfo.roomId);
+        if (!room || room.gameState !== 'playing') return;
+        
+        if (room.collectPowerUp(playerInfo.playerId, data.powerUpId)) {
+            room.broadcastToRoom('powerUpCollected', {
+                powerUpId: data.powerUpId,
+                playerId: playerInfo.playerId,
+                players: Array.from(room.players.values())
+            });
         }
     });
     
@@ -621,98 +494,41 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
         
-        try {
-            const playerInfo = playerSockets.get(socket.id);
-            const transitionData = transitioningPlayers.get(socket.id);
-            
-            if (playerInfo) {
-                const room = gameRooms.get(playerInfo.roomId);
-                if (room) {
-                    // If player is transitioning (game just started), delay room cleanup
-                    if (transitionData) {
-                        console.log(`Player ${transitionData.playerName} disconnected during transition, delaying cleanup`);
-                        
-                        // Schedule delayed cleanup (10 seconds to allow reconnection)
-                        setTimeout(() => {
-                            // Check if player has reconnected
-                            if (transitioningPlayers.has(socket.id)) {
-                                console.log(`Player ${transitionData.playerName} failed to reconnect, removing from room`);
-                                transitioningPlayers.delete(socket.id);
-                                
-                                const currentRoom = gameRooms.get(playerInfo.roomId);
-                                if (currentRoom) {
-                                    const removedPlayerId = currentRoom.removePlayer(socket.id);
-                                    if (removedPlayerId) {
-                                        currentRoom.broadcastToRoom('playerLeft', {
-                                            playerId: removedPlayerId,
-                                            gameState: currentRoom.getGameState()
-                                        });
-                                        
-                                        // Clean up empty rooms
-                                        if (currentRoom.players.size === 0) {
-                                            gameRooms.delete(playerInfo.roomId);
-                                            console.log(`Room deleted after timeout: ${playerInfo.roomId}`);
-                                        }
-                                    }
-                                }
-                            }
-                        }, 30000); // 30 second grace period
-                        
-                    } else {
-                        // Normal disconnect - immediate cleanup
-                        const removedPlayerId = room.removePlayer(socket.id);
-                        if (removedPlayerId) {
-                            room.broadcastToRoom('playerLeft', {
-                                playerId: removedPlayerId,
-                                gameState: room.getGameState()
-                            });
-                            
-                            // Clean up empty rooms
-                            if (room.players.size === 0) {
-                                gameRooms.delete(playerInfo.roomId);
-                                console.log(`Room deleted: ${playerInfo.roomId}`);
-                            }
-                        }
+        const playerInfo = playerSockets.get(socket.id);
+        if (playerInfo) {
+            const room = gameRooms.get(playerInfo.roomId);
+            if (room) {
+                const removedPlayerId = room.removePlayer(socket.id);
+                if (removedPlayerId) {
+                    room.broadcastToRoom('playerLeft', {
+                        playerId: removedPlayerId,
+                        gameState: room.getGameState()
+                    });
+                    
+                    // Clean up empty rooms
+                    if (room.players.size === 0) {
+                        gameRooms.delete(playerInfo.roomId);
+                        console.log(`Room deleted: ${playerInfo.roomId}`);
                     }
                 }
-                
-                playerSockets.delete(socket.id);
             }
-        } catch (error) {
-            console.error('Error handling disconnect:', error);
+            
+            playerSockets.delete(socket.id);
         }
     });
 });
 
-// Periodic cleanup of old power-ups and stale transitions
-setInterval(() => {
-    for (let room of gameRooms.values()) {
-        room.cleanupOldPowerUps();
-    }
-    
-    // Clean up stale transition data (older than 2 minutes)
-    const now = Date.now();
-    for (let [socketId, transitionData] of transitioningPlayers.entries()) {
-        if (now - transitionData.transitionStart > 120000) {
-            console.log(`Cleaning up stale transition data for ${transitionData.playerName}`);
-            transitioningPlayers.delete(socketId);
-        }
-    }
-}, 30000); // Every 30 seconds
+// Serve the main game files
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'lobby.html'));
+});
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down gracefully');
-    server.close(() => {
-        console.log('Server closed');
-        process.exit(0);
-    });
+app.get('/game', (req, res) => {
+    res.sendFile(path.join(__dirname, 'multiplayer.html'));
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`🚀 BombSquad Multiplayer Server running on port ${PORT}`);
-    console.log(`🌐 Server URL: http://localhost:${PORT}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
-    console.log('🎮 Ready for players!');
+    console.log(`BombSquad Multiplayer Server running on port ${PORT}`);
+    console.log(`Open http://localhost:${PORT} to start playing!`);
 });
