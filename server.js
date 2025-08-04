@@ -111,7 +111,7 @@ class GameRoom {
             isAlive: true,
             bombCapacity: 1,
             bombCount: 0,
-            bombPower: 3,
+            bombPower: 5,
             powerUps: { speed: 1, bombs: 0, power: 0 },
             lastUpdate: Date.now()
         };
@@ -248,7 +248,7 @@ class GameRoom {
                 );
                 
                 if (distance < 40) {
-                    player.health -= 50;
+                    player.health -= 25;
                     if (player.health <= 0) {
                         player.isAlive = false;
                         console.log(`Player ${player.id} eliminated`);
@@ -611,6 +611,11 @@ io.on('connection', (socket) => {
         } catch (error) {
             console.error('Error collecting power-up:', error);
         }
+    });
+    
+    // Ping handler
+    socket.on('ping', (data) => {
+        socket.emit('pong', { timestamp: data.timestamp });
     });
     
     socket.on('disconnect', () => {
